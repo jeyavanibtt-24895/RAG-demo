@@ -16,14 +16,14 @@ What this program does:
 The college handbook is fictional and is only for learning.
 
 Install required libraries in your terminal or notebook:
-    pip install pypdf sentence-transformers faiss-cpu openai numpy
+    pip install pypdf sentence-transformers faiss-cpu google-genai numpy
 
 Before running the answer-generation part, set your API key securely:
     macOS/Linux:
-        export OPENAI_API_KEY="your-api-key"
+        export GEMINI_API_KEY="your-api-key"
 
     Windows PowerShell:
-        $env:OPENAI_API_KEY="your-api-key"
+        $env:GEMINI_API_KEY="your-api-key"
 
 Do not share your API key or commit it to a public code repository.
 """
@@ -38,7 +38,7 @@ import numpy as np              # Handles numerical arrays
 import faiss                    # Performs fast vector similarity search
 from pypdf import PdfReader     # Reads text from PDF files
 from sentence_transformers import SentenceTransformer  # Creates embeddings
-from openai import OpenAI       # Connects to OpenAI's API for answer generation
+from google import genai        # Official Google Gemini SDK for answer generation
 
 
 # ---------------------------------------------------------------
@@ -59,7 +59,7 @@ EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 
 # The OpenAI model used only for generating the final answer.
 # You need a valid API key and API access to use this step.
-GENERATION_MODEL_NAME = "gpt-4.1-mini"
+GENERATION_MODEL_NAME = "gemini-3.8-flash"  # Change if your API account uses another available model
 
 
 # ---------------------------------------------------------------
@@ -359,46 +359,33 @@ ANSWER:
 
 def generate_answer(prompt: str) -> str:
     """
-    Send the prompt to the OpenAI API and return the generated answer.
+    Send the prompt to the Gemini API and return the generated answer.
 
     This is the GENERATION part of Retrieval-Augmented Generation.
     It is separate from the embedding model and FAISS retrieval.
     """
 
-    # Read the API key from an environment variable.
+    # Read the Gemini API key from an environment variable.
     # This avoids putting a secret key directly in the source code.
-    api_key = os.environ.get("OPENAI_API_KEY")
+    api_key = os.environ.get("GEMINI_API_KEY")
 
     if not api_key:
         raise EnvironmentError(
-            "OPENAI_API_KEY was not found. Set it in your environment "
+            "GEMINI_API_KEY was not found. Set it in your environment "
             "before using answer generation."
         )
 
-    # Create the API client.
-    client = OpenAI(api_key=api_key)
+    # Create a Gemini API client using your key.
+    client = genai.Client(api_key=api_key)
 
-    # Send the prompt to the selected model.
-    response = client.chat.completions.create(
+    # Send the prompt to the selected Gemini model.
+    response = client.models.generate_content(
         model=GENERATION_MODEL_NAME,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "Follow the instructions and ground your answer "
-                    "in the supplied handbook context."
-                )
-            },
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ],
-        temperature=0
+        contents=prompt
     )
 
-    # Extract the generated text from the API response.
-    return response.choices[0].message.content or ""
+    # Extract the generated text from Gemini's response.
+    return response.text or ""
 
 
 # ---------------------------------------------------------------
@@ -486,7 +473,7 @@ def main():
         except Exception as error:
             # Retrieval has already worked even if the LLM/API call fails.
             print("\nAnswer generation failed.")
-            print("Check your API key, model access, and internet connection.")
+            print("Check your Gemini API key, model availability, and internet connection.")
             print(f"Error details: {error}")
 
         print("\n" + "=" * 70 + "\n")
