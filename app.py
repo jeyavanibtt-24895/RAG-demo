@@ -11,19 +11,17 @@ What this program does:
 5. Converts a student's question into an embedding.
 6. Retrieves the most relevant chunks using semantic similarity.
 7. Builds a prompt using the question and retrieved context.
-8. Sends the prompt to an LLM (OpenAI) to generate an answer.
+8. Sends the prompt to Gemini to generate an answer.
 
 The college handbook is fictional and is only for learning.
 
 Install required libraries in your terminal or notebook:
     pip install pypdf sentence-transformers faiss-cpu google-genai numpy
 
-Before running the answer-generation part, set your API key securely:
-    macOS/Linux:
-        export GEMINI_API_KEY="your-api-key"
-
-    Windows PowerShell:
-        $env:GEMINI_API_KEY="your-api-key"
+In Google Colab, click the Secrets (key) icon in the sidebar.
+Add a secret named GEMINI_API_KEY and enable notebook access.
+The script reads it using google.colab.userdata.get("GEMINI_API_KEY").
+Outside Colab, you can use the GEMINI_API_KEY environment variable.
 
 Do not share your API key or commit it to a public code repository.
 """
@@ -50,16 +48,17 @@ from google import genai        # Official Google Gemini SDK for answer generati
 PDF_PATH = Path("sample_college_handbook.pdf")
 
 # Number of chunks to retrieve for each question.
-# For this simple demo, we retrieve the 3 most similar chunks.
-TOP_K = 3
+# Retrieve 5 chunks so a relevant rule is less likely to be missed.
+TOP_K = 5
 
 # Name of a small, commonly used sentence embedding model.
 # The first run may download the model from the model hub.
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 
-# The OpenAI model used only for generating the final answer.
-# You need a valid API key and API access to use this step.
-GENERATION_MODEL_NAME = "gemini-3.8-flash"  # Change if your API account uses another available model
+# The Gemini model used only for generating the final answer.
+# This matches the model recommended by the API error in this project.
+# If unavailable for your account, list models available to your API key.
+GENERATION_MODEL_NAME = "gemini-3.1-flash-lite"
 
 
 # ---------------------------------------------------------------
@@ -147,8 +146,11 @@ def split_into_chunks(
     split by paragraphs, headings, sentences, or token counts.
     """
 
-    # Replace repeated whitespace and line breaks with single spaces.
-    cleaned_text = " ".join(text.split())
+    # Normalize line endings, but preserve paragraph breaks while chunking.
+    # Paragraph boundaries help keep handbook rules together.
+    cleaned_text = text.replace("\r\n", "\n").replace("\r", "\n")
+    paragraphs = [" ".join(part.split()) for part in cleaned_text.split("\n")]
+    cleaned_text = "\n".join(part for part in paragraphs if part)
 
     # Prevent invalid settings that could cause an infinite loop.
     if chunk_size <= 0:
@@ -161,8 +163,16 @@ def split_into_chunks(
 
     # Move through the document until we reach the end.
     while start < len(cleaned_text):
-        # Pick the end position of this chunk.
-        end = start + chunk_size
+        # Pick the approximate end position of this chunk.
+        end = min(start + chunk_size, len(cleaned_text))
+
+        # If possible, finish at a paragraph boundary instead of cutting
+        # a handbook rule in the middle. Only do this when the boundary is
+        # not too close to the start, which prevents tiny chunks.
+        if end < len(cleaned_text):
+            boundary = cleaned_text.rfind("\n", start, end)
+            if boundary > start + chunk_size // 2:
+                end = boundary
 
         # Extract the text between start and end.
         chunk = cleaned_text[start:end].strip()
@@ -176,10 +186,22 @@ def split_into_chunks(
             break
 
         # Start the next chunk before the previous one ended.
-        # This creates the overlap.
-        start = end - overlap
+        # This creates the overlap while ensuring forward progress.
+        start = max(start + 1, end - overlap)
 
     print(f"Chunks created: {len(chunks)}")
+
+    # Diagnostic: show chunks that mention attendance, useful for checking
+    # whether important policy text survived PDF extraction and chunking.
+    attendance_chunks = [
+        (i, chunk) for i, chunk in enumerate(chunks)
+        if "attendance" in chunk.lower() or "75%" in chunk
+    ]
+    if attendance_chunks:
+        print("Attendance-related chunks found:", [i for i, _ in attendance_chunks])
+    else:
+        print("WARNING: No attendance-related chunk found. Check the PDF text extraction.")
+
     return chunks
 
 
@@ -331,15 +353,16 @@ def build_prompt(question: str, retrieved_chunks: list[dict]) -> str:
 
     # This is the prompt template.
     prompt = f"""
-You are an assistant answering questions about a fictional college handbook.
+You are an assistant answering questions using a fictional college handbook.
 
-Instructions:
-- Use only the handbook context provided below.
-- Do not invent rules, percentages, deadlines, or dates.
-- If the context does not contain the answer, say:
+Rules:
+- Answer the student's question directly and concisely.
+- Use only the information in the supplied handbook context.
+- Clearly state relevant percentages and requirements.
+- Do not invent a fixed number of classes if the handbook does not specify one.
+- If the answer is missing from the context, say:
   "I couldn't find that information in the sample handbook."
-- Explain the answer clearly and briefly.
-- Remember that this is a synthetic teaching document, not an official policy.
+- Remember that this is a synthetic teaching document, not official policy.
 
 HANDBOOK CONTEXT:
 {context}
@@ -365,27 +388,73 @@ def generate_answer(prompt: str) -> str:
     It is separate from the embedding model and FAISS retrieval.
     """
 
-    # Read the Gemini API key from an environment variable.
-    # This avoids putting a secret key directly in the source code.
-    api_key = os.environ.get("GEMINI_API_KEY")
+    # Read the Gemini API key from Google Colab Secrets (key icon in sidebar).
+    # Add a secret named GEMINI_API_KEY and enable notebook access.
+    # No manual key entry or environment variable setup is needed in Colab.
+    try:
+        from google.colab import userdata
+        api_key = userdata.get("GEMINI_API_KEY")
+    except ImportError:
+        # Outside Colab, allow the same script to use an environment variable.
+        api_key = os.environ.get("GEMINI_API_KEY")
+    except Exception as error:
+        raise RuntimeError(
+            "Could not read GEMINI_API_KEY from Colab Secrets. "
+            "Open the key icon in Colab, add GEMINI_API_KEY, "
+            "and enable notebook access."
+        ) from error
 
     if not api_key:
-        raise EnvironmentError(
-            "GEMINI_API_KEY was not found. Set it in your environment "
-            "before using answer generation."
+        raise RuntimeError(
+            "GEMINI_API_KEY is empty or missing. Add it in Colab Secrets "
+            "and enable notebook access."
         )
 
-    # Create a Gemini API client using your key.
-    client = genai.Client(api_key=api_key)
-
-    # Send the prompt to the selected Gemini model.
-    response = client.models.generate_content(
-        model=GENERATION_MODEL_NAME,
-        contents=prompt
+    # Set a 30-second request timeout so a stalled API call does not wait
+    # indefinitely. The timeout value is in milliseconds in google-genai.
+    from google.genai import types
+    client = genai.Client(
+        api_key=api_key,
+        http_options=types.HttpOptions(timeout=30000)
     )
 
-    # Extract the generated text from Gemini's response.
-    return response.text or ""
+    # Retry temporary service failures (such as HTTP 503) a limited number
+    # of times. Exponential backoff waits 2 seconds, then 4 seconds.
+    # Invalid keys, unavailable model names, and other permanent errors will
+    # be reported immediately rather than repeatedly retried.
+    from google.genai import errors
+    import time
+
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = client.models.generate_content(
+                model=GENERATION_MODEL_NAME,
+                contents=prompt
+            )
+
+            # Extract generated text, including a helpful message if no text is returned.
+            answer = response.text
+            if not answer:
+                raise RuntimeError(
+                    "Gemini returned no text. Check the model response and safety feedback."
+                )
+            return answer
+
+        except errors.APIError as error:
+            # Retry only service-busy/server-side errors. Do not retry 400/401/403/404.
+            status_code = getattr(error, "code", None)
+            if status_code not in (429, 500, 502, 503, 504) or attempt == max_attempts:
+                raise
+
+            wait_seconds = 2 ** attempt
+            print(
+                f"Gemini temporarily unavailable (attempt {attempt}/{max_attempts}). "
+                f"Retrying in {wait_seconds} seconds..."
+            )
+            time.sleep(wait_seconds)
+
+    raise RuntimeError("Gemini answer generation failed after retries.")
 
 
 # ---------------------------------------------------------------
@@ -403,7 +472,7 @@ def main():
     # B. Split the text into chunks.
     chunks = split_into_chunks(
         handbook_text,
-        chunk_size=700,
+        chunk_size=450,
         overlap=120
     )
 
@@ -473,7 +542,7 @@ def main():
         except Exception as error:
             # Retrieval has already worked even if the LLM/API call fails.
             print("\nAnswer generation failed.")
-            print("Check your Gemini API key, model availability, and internet connection.")
+            print("Check the exact error below. It may indicate a key, model, quota, timeout, or network issue.")
             print(f"Error details: {error}")
 
         print("\n" + "=" * 70 + "\n")
